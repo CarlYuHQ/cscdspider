@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="禁止使用。该项目强制非无头模式，传入将直接报错。",
+        help="启用无头模式（默认关闭，保持有界面模式）。",
     )
     return parser
 
@@ -45,8 +45,6 @@ async def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.headless:
-        raise ValueError("该脚本不支持无头模式，请去掉 --headless。")
     if args.limit <= 0:
         raise ValueError("--limit 必须大于 0。")
 
@@ -57,7 +55,13 @@ async def main() -> int:
     download_dir.mkdir(parents=True, exist_ok=True)
 
     logger = setup_logger(logs_dir)
-    logger.info("开始执行: year=%s, limit=%s, start_page=%s", args.year, args.limit, args.start_page)
+    logger.info(
+        "开始执行: year=%s, limit=%s, start_page=%s, headless=%s",
+        args.year,
+        args.limit,
+        args.start_page,
+        args.headless,
+    )
     logger.info("下载目录: %s", download_dir)
 
     spider = CscdSpider(
@@ -67,6 +71,7 @@ async def main() -> int:
         download_dir=download_dir,
         config=config,
         logger=logger,
+        headless=args.headless,
     )
     report = await spider.run()
 

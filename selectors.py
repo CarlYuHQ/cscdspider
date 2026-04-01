@@ -59,6 +59,11 @@ NEXT_PAGE_BUTTON_SELECTORS = [
     "li.ant-pagination-next button",
 ]
 
+PAGINATION_PAGE_INPUT_SELECTORS = [
+    "li.ant-pagination-simple-pager input",
+    "li[title*='/'] input",
+]
+
 EXPORT_MENU_BUTTON_SELECTORS = [
     "button:has-text('导出方式')",
 ]

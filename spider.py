@@ -31,6 +31,7 @@ class CscdSpider:
         download_dir: Path,
         config: SpiderConfig,
         logger,
+        headless: bool = False,
     ) -> None:
         self.year = year
         self.limit = limit
@@ -38,6 +39,7 @@ class CscdSpider:
         self.download_dir = download_dir
         self.config = config
         self.logger = logger
+        self.headless = headless
         self.playwright = None
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
@@ -55,8 +57,8 @@ class CscdSpider:
                 limit=self.limit,
                 total_results_reported_by_site=total_results,
             )
-            await self._goto_start_page_if_needed()
             await self._set_page_size_to_20()
+            await self._goto_start_page_if_needed()
             await self._run_batches(report)
             report.complete()
             return report
@@ -76,14 +78,14 @@ class CscdSpider:
         self.playwright = await async_playwright().start()
         try:
             self.browser = await self.playwright.chromium.launch(
-                headless=False,
+                headless=self.headless,
                 channel="chrome",
                 slow_mo=self.config.action_delay_ms,
             )
         except PlaywrightError:
             # 本机未安装可识别 Chrome 时，回退到 Playwright 自带 Chromium。
             self.browser = await self.playwright.chromium.launch(
-                headless=False,
+                headless=self.headless,
                 slow_mo=self.config.action_delay_ms,
             )
         self.context = await self.browser.new_context(accept_downloads=True)
@@ -185,11 +187,34 @@ class CscdSpider:
     async def _goto_start_page_if_needed(self) -> None:
         if self.start_page <= 1:
             return
-        self.logger.info("从第 %s 页恢复，开始逐页跳转。", self.start_page)
-        for _ in range(1, self.start_page):
-            moved = await self._go_next_page()
-            if not moved:
-                raise RuntimeError(f"无法跳转到 start_page={self.start_page}，提前到达末页。")
+        assert self.page is not None
+        self.logger.info("从第 %s 页恢复，使用分页输入框直接跳转。", self.start_page)
+        page_input = await self._first_visible_locator(ui.PAGINATION_PAGE_INPUT_SELECTORS)
+        await page_input.click()
+        await page_input.fill(str(self.start_page))
+        await page_input.press("Enter")
+        await self.page.wait_for_timeout(1500)
+
+        jumped_ok = await self._is_current_page(self.start_page)
+        if not jumped_ok:
+            raise RuntimeError(f"分页输入框跳转失败，目标页: {self.start_page}")
+
+    async def _is_current_page(self, expected_page: int) -> bool:
+        assert self.page is not None
+        active_item = self.page.locator("li.ant-pagination-item-active")
+        if await active_item.count() > 0:
+            text = (await active_item.first.inner_text()).strip()
+            if text.isdigit():
+                return int(text) == expected_page
+
+        try:
+            page_input = await self._first_visible_locator(ui.PAGINATION_PAGE_INPUT_SELECTORS)
+            input_value = (await page_input.input_value()).strip()
+            if input_value.isdigit():
+                return int(input_value) == expected_page
+        except Exception:
+            return False
+        return False
 
     async def _set_page_size_to_20(self) -> None:
         assert self.page is not None
