@@ -18,10 +18,10 @@ playwright install
 
 ## 运行
 
-### 1) 常规有头运行（默认）
+### 1) 常规有头运行（默认，全量）
 
 ```bash
-python run.py --year 2019 --limit 2000
+python run.py --year 2019
 ```
 
 ### 2) 无头运行（新增支持）
@@ -49,7 +49,7 @@ python run.py --year 2019 --limit 1000 --download-dir "D:\\data\\cscd"
 ## 参数说明
 
 - `--year`：检索年份（必填）
-- `--limit`：目标条数（默认 `2000`）
+- `--limit`：目标条数（可选；不传时按检索结果总数全量抓取）
 - `--start-page`：从指定页开始（默认 `1`，输入框直跳）
 - `--download-dir`：自定义下载目录
 - `--headless`：启用无头模式（默认不启用，保持有界面）
@@ -71,3 +71,4 @@ python run.py --year 2019 --limit 1000 --download-dir "D:\\data\\cscd"
 
 - 运行入口固定使用 `python run.py ...`，不需要 `python -m`。
 - 如页面结构变化，请更新 `selectors.py` 中的选择器。
+- 若未传 `--limit`，脚本会使用页面识别到的“篇文献”总数作为抓取上限。

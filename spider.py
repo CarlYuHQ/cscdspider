@@ -26,7 +26,7 @@ class CscdSpider:
         self,
         *,
         year: int,
-        limit: int,
+        limit: int | None,
         start_page: int,
         download_dir: Path,
         config: SpiderConfig,
@@ -52,21 +52,24 @@ class CscdSpider:
             await self._apply_year_filter(self.year)
             total_results = await self._read_total_results()
             self.logger.info("站点检索结果总数: %s", total_results)
+            effective_limit = self.limit if self.limit is not None else total_results
+            if effective_limit <= 0:
+                raise RuntimeError("无法识别站点检索总数，且未显式提供 --limit。")
             report = RunReport(
                 year=self.year,
-                limit=self.limit,
+                limit=effective_limit,
                 total_results_reported_by_site=total_results,
             )
             await self._set_page_size_to_20()
             await self._goto_start_page_if_needed()
-            await self._run_batches(report)
+            await self._run_batches(report, effective_limit)
             report.complete()
             return report
         except Exception as err:
             self.logger.exception("执行失败: %s", err)
             failed_report = RunReport(
                 year=self.year,
-                limit=self.limit,
+                limit=self.limit or 0,
                 total_results_reported_by_site=0,
             )
             failed_report.fail(err)
@@ -111,9 +114,9 @@ class CscdSpider:
             await self.page.wait_for_url("**/simple", timeout=self.config.navigation_timeout_ms)
             await self.page.wait_for_timeout(self.config.search_settle_ms)
 
-    async def _run_batches(self, report: RunReport) -> None:
+    async def _run_batches(self, report: RunReport, limit: int) -> None:
         assert self.page is not None
-        remaining = self.limit
+        remaining = limit
         current_page = self.start_page
         batch_index = 1
 

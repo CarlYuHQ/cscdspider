@@ -14,7 +14,12 @@ from spider import CscdSpider
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CSCD 下载导出自动化脚本")
     parser.add_argument("--year", type=int, required=True, help="检索年份，例如 2019")
-    parser.add_argument("--limit", type=int, default=2000, help="目标抓取条数，例如 2000")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="目标抓取条数；不传则按检索结果总数全量抓取。",
+    )
     parser.add_argument("--start-page", type=int, default=1, help="从第几页开始继续执行")
     parser.add_argument("--download-dir", type=str, default="", help="自定义下载目录")
     parser.add_argument(
@@ -45,7 +50,7 @@ async def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.limit <= 0:
+    if args.limit is not None and args.limit <= 0:
         raise ValueError("--limit 必须大于 0。")
 
     project_root = Path(__file__).resolve().parent
@@ -58,7 +63,7 @@ async def main() -> int:
     logger.info(
         "开始执行: year=%s, limit=%s, start_page=%s, headless=%s",
         args.year,
-        args.limit,
+        args.limit if args.limit is not None else "ALL",
         args.start_page,
         args.headless,
     )
