@@ -121,6 +121,11 @@ class CscdSpider:
         batch_index = 1
 
         while remaining > 0:
+            await self._verify_page_alignment(
+                expected_page=current_page,
+                context=f"批次{batch_index}开始前",
+                auto_fix=True,
+            )
             batch_records = min(remaining, self.config.max_export_per_batch)
             pages_to_select = min(
                 self.config.max_pages_per_batch,
@@ -135,7 +140,10 @@ class CscdSpider:
             )
 
             try:
-                actual_pages = await self._select_pages_for_current_batch(pages_to_select)
+                actual_pages = await self._select_pages_for_current_batch(
+                    pages_to_select=pages_to_select,
+                    expected_start_page=current_page,
+                )
                 if actual_pages <= 0:
                     report.notes.append("无法继续翻页，提前结束。")
                     break
@@ -145,7 +153,11 @@ class CscdSpider:
                 batch.selected_records = selected_records
                 batch.end_page = current_page + actual_pages - 1
 
-                downloaded_file = await self._export_selected(batch_index)
+                downloaded_file = await self._export_selected(
+                    batch_index=batch_index,
+                    start_page=batch.start_page,
+                    end_page=batch.end_page,
+                )
                 batch.done(downloaded_file)
                 report.downloaded_files.append(downloaded_file)
                 report.batches.append(batch)
@@ -158,7 +170,7 @@ class CscdSpider:
                     break
 
                 await self._clear_all_record_selection()
-                if not await self._go_next_page():
+                if not await self._go_next_page(expected_after=current_page):
                     report.notes.append("批次结束后无法翻到下一页，提前结束。")
                     break
             except Exception as err:
@@ -201,6 +213,11 @@ class CscdSpider:
         jumped_ok = await self._is_current_page(self.start_page)
         if not jumped_ok:
             raise RuntimeError(f"分页输入框跳转失败，目标页: {self.start_page}")
+        await self._verify_page_alignment(
+            expected_page=self.start_page,
+            context="start-page跳转后",
+            auto_fix=False,
+        )
 
     async def _is_current_page(self, expected_page: int) -> bool:
         assert self.page is not None
@@ -229,19 +246,30 @@ class CscdSpider:
         await self._safe_click(ui.PAGE_SIZE_20_OPTIONS, "选择20条/页")
         await self.page.wait_for_timeout(1200)
 
-    async def _select_pages_for_current_batch(self, pages_to_select: int) -> int:
+    async def _select_pages_for_current_batch(self, pages_to_select: int, expected_start_page: int) -> int:
         selected_pages = 0
         for i in range(pages_to_select):
+            expected_page = expected_start_page + i
+            await self._verify_page_alignment(
+                expected_page=expected_page,
+                context=f"批次内第{i + 1}/{pages_to_select}次勾选前",
+                auto_fix=True,
+            )
             await self._ensure_checkbox_checked(ui.CURRENT_PAGE_CHECKBOX_SELECTORS, "本页勾选")
+            await self._verify_page_alignment(
+                expected_page=expected_page,
+                context=f"批次内第{i + 1}/{pages_to_select}次勾选后",
+                auto_fix=True,
+            )
             selected_pages += 1
             if i == pages_to_select - 1:
                 break
-            moved = await self._go_next_page()
+            moved = await self._go_next_page(expected_after=expected_page + 1)
             if not moved:
                 break
         return selected_pages
 
-    async def _go_next_page(self) -> bool:
+    async def _go_next_page(self, expected_after: int | None = None) -> bool:
         assert self.page is not None
         if await self.page.locator("li.ant-pagination-next.ant-pagination-disabled").count() > 0:
             return False
@@ -249,11 +277,17 @@ class CscdSpider:
             await self._safe_click(ui.NEXT_PAGE_BUTTON_SELECTORS, "点击下一页按钮")
             await self.page.wait_for_load_state("domcontentloaded")
             await self.page.wait_for_timeout(1000)
+            if expected_after is not None:
+                await self._verify_page_alignment(
+                    expected_page=expected_after,
+                    context="点击下一页后",
+                    auto_fix=True,
+                )
             return True
         except Exception:
             return False
 
-    async def _export_selected(self, batch_index: int) -> str:
+    async def _export_selected(self, batch_index: int, start_page: int, end_page: int) -> str:
         assert self.page is not None
         await self._safe_click(ui.EXPORT_MENU_BUTTON_SELECTORS, "点击导出方式菜单")
         await self._safe_click(ui.EXPORT_DOWNLOAD_MENUITEM_SELECTORS, "选择下载导出")
@@ -265,11 +299,86 @@ class CscdSpider:
         download = await download_info.value
 
         suggested_name = download.suggested_filename or f"batch_{batch_index}.xlsx"
-        output_name = f"batch_{batch_index:03d}_{suggested_name}"
+        output_name = f"batch_{batch_index:03d}_p{start_page}-{end_page}_{suggested_name}"
         output_path = self.download_dir / output_name
         await download.save_as(str(output_path))
         self.logger.info("批次 %s 下载完成: %s", batch_index, output_path)
         return str(output_path)
+
+    async def _read_pagination_progress(self) -> tuple[int, int] | None:
+        """
+        读取分页条中的“当前页/总页数”，优先解析 li.ant-pagination-simple-pager 的 title，如“1/23777”。
+        返回 (current_page, total_pages)；读不到返回 None。
+        """
+        assert self.page is not None
+        pager = self.page.locator("li.ant-pagination-simple-pager").first
+        if await pager.count() == 0:
+            return None
+
+        title = (await pager.get_attribute("title") or "").strip()
+        if title:
+            m = re.search(r"(\d+)\s*/\s*(\d+)", title)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+
+        try:
+            page_input = await self._first_visible_locator(ui.PAGINATION_PAGE_INPUT_SELECTORS)
+            current_text = (await page_input.input_value()).strip()
+            slash_text = (await pager.inner_text()).strip()
+            m2 = re.search(r"/\s*(\d+)", slash_text)
+            if current_text.isdigit() and m2:
+                return int(current_text), int(m2.group(1))
+        except Exception:
+            return None
+        return None
+
+    async def _jump_to_page(self, target_page: int) -> None:
+        assert self.page is not None
+        page_input = await self._first_visible_locator(ui.PAGINATION_PAGE_INPUT_SELECTORS)
+        await page_input.click()
+        await page_input.fill(str(target_page))
+        await page_input.press("Enter")
+        await self.page.wait_for_timeout(1200)
+
+    async def _verify_page_alignment(
+        self,
+        *,
+        expected_page: int,
+        context: str,
+        auto_fix: bool,
+    ) -> None:
+        """
+        校验“内部期望页码”与分页条输入框/标题一致；不一致时可自动纠偏跳转。
+        """
+        progress = await self._read_pagination_progress()
+        if progress is None:
+            self.logger.warning("[%s] 未读取到分页进度，跳过页码校验。", context)
+            return
+        ui_current, ui_total = progress
+        if ui_current == expected_page:
+            self.logger.info("[%s] 页码校验通过: %s/%s", context, ui_current, ui_total)
+            return
+
+        msg = (
+            f"[{context}] 页码校验失败: 期望第 {expected_page} 页，"
+            f"分页条显示 {ui_current}/{ui_total}"
+        )
+        if not auto_fix:
+            raise RuntimeError(msg)
+
+        self.logger.warning("%s，尝试分页输入框纠偏跳转。", msg)
+        await self._jump_to_page(expected_page)
+        progress2 = await self._read_pagination_progress()
+        if progress2 is None:
+            raise RuntimeError(f"{msg}；纠偏后仍无法读取分页条。")
+        ui_current2, ui_total2 = progress2
+        if ui_current2 != expected_page:
+            raise RuntimeError(
+                f"{msg}；纠偏后仍不一致：{ui_current2}/{ui_total2}"
+            )
+        self.logger.info(
+            "[%s] 页码已纠偏到 %s/%s", context, ui_current2, ui_total2
+        )
 
     async def _clear_all_record_selection(self) -> None:
         await self._click_checkbox_toggle(ui.ALL_RECORDS_CHECKBOX_SELECTORS, "所有记录取消(1/2)")

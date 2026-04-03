@@ -39,6 +39,8 @@ python run.py --year 2019 --limit 1000 --start-page 51
 > `--start-page` 现在为“**输入框直跳**”模式：会在分页输入框（如 `1/85802` 左侧输入框）中直接填入页码并回车，而不是逐页点击“下一页”。
 >
 > 执行顺序为：先切换到 `20条/页`，再执行 `--start-page` 跳转。
+>
+> 新增页码一致性校验：脚本会维护内部期望页码，并与分页器 `li.ant-pagination-simple-pager` 的 `title`/输入框值（如 `1/23777`）逐步比对；若不一致会先尝试输入框纠偏跳转，仍不一致则报错终止，避免抓错页内容。
 
 ### 4) 自定义下载目录
 
@@ -59,6 +61,11 @@ python run.py --year 2019 --limit 1000 --download-dir "D:\\data\\cscd"
 - 下载文件：`cscdspider/downloads/`
 - 运行日志：`cscdspider/logs/run.log`
 - 批次报告：`cscdspider/reports/report_*.json`
+
+下载文件命名（新增）：
+
+- `batch_{批次号}_p{起始页}-{结束页}_{站点原文件名}`
+- 示例：`batch_007_p351-400_xxx.txt`
 
 报告包含：
 
