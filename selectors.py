@@ -44,8 +44,8 @@ PAGE_SIZE_20_OPTIONS = [
 ]
 
 CURRENT_PAGE_CHECKBOX_SELECTORS = [
+    "label.ant-checkbox-wrapper:has(span:has-text('本页')) input.ant-checkbox-input",
     "label:has-text('本页') input.ant-checkbox-input",
-    "text=本页",
     "table thead input.ant-checkbox-input",
 ]
 
@@ -80,4 +80,10 @@ EXPORT_PANEL_SELECT_ALL_CHECKBOX_SELECTORS = [
 EXPORT_SUBMIT_BUTTON_SELECTORS = [
     "button.primary-btn.Export_btn__hVJKw:has-text('导出')",
     ".ant-modal-content button:has-text('导出')",
+]
+
+LOADING_OVERLAY_SELECTORS = [
+    "div.useLoading_loading-overlay__MIFyx",
+    "div.ant-spin-fullscreen.ant-spin-fullscreen-show",
+    "span.ant-spin-dot.ant-spin-dot-spin",
 ]

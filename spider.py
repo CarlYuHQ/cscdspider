@@ -289,7 +289,7 @@ class CscdSpider:
 
     async def _export_selected(self, batch_index: int, start_page: int, end_page: int) -> str:
         assert self.page is not None
-        await self._safe_click(ui.EXPORT_MENU_BUTTON_SELECTORS, "点击导出方式菜单")
+        await self._safe_click_export_menu()
         await self._safe_click(ui.EXPORT_DOWNLOAD_MENUITEM_SELECTORS, "选择下载导出")
         await self._ensure_checkbox_checked(ui.EXPORT_PANEL_SELECT_ALL_CHECKBOX_SELECTORS, "导出面板全选")
 
@@ -384,21 +384,93 @@ class CscdSpider:
         await self._click_checkbox_toggle(ui.ALL_RECORDS_CHECKBOX_SELECTORS, "所有记录取消(1/2)")
         await self._click_checkbox_toggle(ui.ALL_RECORDS_CHECKBOX_SELECTORS, "所有记录取消(2/2)")
 
+    async def _wait_loading_overlay_hidden(self, timeout_ms: int | None = None) -> None:
+        """
+        等待全屏 loading 遮罩消失，避免点击被 useLoading/ant-spin 拦截。
+        """
+        assert self.page is not None
+        t = timeout_ms or self.config.default_timeout_ms
+        for selector in ui.LOADING_OVERLAY_SELECTORS:
+            loc = self.page.locator(selector)
+            try:
+                # 允许不存在；存在时需 hidden
+                await loc.first.wait_for(state="hidden", timeout=t)
+            except PlaywrightTimeoutError:
+                # 某些站点 spin 闪烁，继续由后续重试兜底
+                self.logger.warning("等待遮罩消失超时: %s", selector)
+            except Exception:
+                continue
+
+    async def _safe_click_export_menu(self) -> None:
+        """
+        导出菜单专用点击：点击前后都等待遮罩消失；失败时再等待并重试。
+        """
+        assert self.page is not None
+        last_err: Exception | None = None
+        for _ in range(self.config.click_retry_times):
+            try:
+                await self._wait_loading_overlay_hidden(timeout_ms=10_000)
+                locator = await self._first_visible_locator(ui.EXPORT_MENU_BUTTON_SELECTORS)
+                await locator.click()
+                await self._wait_for_retry()
+                await self._wait_loading_overlay_hidden(timeout_ms=10_000)
+                self.logger.info("点击导出方式菜单 成功。")
+                return
+            except Exception as err:  # noqa: PERF203
+                last_err = err
+                await self._wait_loading_overlay_hidden(timeout_ms=8_000)
+                await self._wait_for_retry()
+        raise RuntimeError(f"点击导出方式菜单 失败: {last_err}")
+
     async def _click_checkbox_toggle(self, selectors: Iterable[str], action_name: str) -> None:
+        await self._wait_loading_overlay_hidden(timeout_ms=8_000)
         locator = await self._first_visible_locator(selectors)
         await locator.click()
         await self._wait_for_retry()
         self.logger.info("%s 完成。", action_name)
 
     async def _ensure_checkbox_checked(self, selectors: Iterable[str], action_name: str) -> None:
+        await self._wait_loading_overlay_hidden(timeout_ms=8_000)
         locator = await self._first_visible_locator(selectors)
+        checked = False
         try:
-            is_checked = await locator.is_checked()
+            checked = await locator.is_checked()
         except PlaywrightError:
-            is_checked = False
-        if not is_checked:
-            await locator.click()
+            checked = False
+
+        if checked:
+            self.logger.info("%s 完成（已勾选）。", action_name)
+            return
+
+        # 站点上的 ant-checkbox-input 经常可见但 click 不稳定，优先使用 check(force=True)。
+        try:
+            await locator.check(force=True, timeout=self.config.default_timeout_ms)
             await self._wait_for_retry()
+        except Exception:
+            # 兜底：点所属 label（或内部方框）再校验。
+            try:
+                label = locator.locator("xpath=ancestor::label[1]").first
+                if await label.count() > 0:
+                    await label.click(force=True, timeout=self.config.default_timeout_ms)
+                    await self._wait_for_retry()
+            except Exception:
+                pass
+
+        try:
+            if not await locator.is_checked():
+                inner = locator.locator("xpath=following-sibling::span[contains(@class,'ant-checkbox-inner')][1]")
+                if await inner.count() > 0:
+                    await inner.click(force=True, timeout=self.config.default_timeout_ms)
+                    await self._wait_for_retry()
+        except Exception:
+            pass
+
+        try:
+            final_checked = await locator.is_checked()
+        except PlaywrightError:
+            final_checked = False
+        if not final_checked:
+            raise RuntimeError(f"{action_name} 失败：checkbox 未进入 checked 状态。")
         self.logger.info("%s 完成。", action_name)
 
     async def _fill_first(self, selectors: Iterable[str], value: str) -> None:
@@ -410,6 +482,7 @@ class CscdSpider:
         last_err: Exception | None = None
         for _ in range(self.config.click_retry_times):
             try:
+                await self._wait_loading_overlay_hidden(timeout_ms=8_000)
                 locator = await self._first_visible_locator(selectors)
                 await locator.click()
                 await self._wait_for_retry()
