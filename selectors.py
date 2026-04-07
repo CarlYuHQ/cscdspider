@@ -33,7 +33,15 @@ RESULT_COUNT_TEXT_PATTERNS = [
     r"([0-9,]+)\s*条/页",
 ]
 
+# 每页条数：优先分页区域内的 ant-select；站点可能把 selector 放在 ant-pagination 外或文案只在 title 上
 PAGE_SIZE_TRIGGER_SELECTORS = [
+    ".ant-pagination .ant-select-selector",
+    ".ant-pagination-options .ant-select-selector",
+    "div.ant-select-selector:has(span.ant-select-selection-item[title='10条/页'])",
+    "div.ant-select-selector:has(span.ant-select-selection-item[title='20条/页'])",
+    "div.ant-select-selector:has(span[title*='条/页'])",
+    ".ant-pagination div.ant-select-selector:has-text('10条/页')",
+    ".ant-pagination div.ant-select-selector:has-text('20条/页')",
     "div.ant-select-selector:has-text('10条/页')",
     "div.ant-select-selector:has-text('20条/页')",
 ]
@@ -41,6 +49,18 @@ PAGE_SIZE_TRIGGER_SELECTORS = [
 PAGE_SIZE_20_OPTIONS = [
     "div.ant-select-item-option-content:has-text('20条/页')",
     "div[title='20条/页']",
+]
+
+# 结果列表排序（非分页区）：默认「默认排序」→ 目标「题名：升序」
+SORT_TRIGGER_SELECTORS = [
+    "div.ant-select-selector:has(span.ant-select-selection-item[title='默认排序'])",
+    "div.ant-select-selector:has(span[title='默认排序'])",
+]
+
+SORT_TITLE_ASC_OPTIONS = [
+    "div.ant-select-item-option[title='题名：升序']",
+    "div.ant-select-item-option:has-text('题名：升序')",
+    "div.ant-select-item-option-content:has-text('题名：升序')",
 ]
 
 CURRENT_PAGE_CHECKBOX_SELECTORS = [

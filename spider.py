@@ -20,6 +20,16 @@ from config import SpiderConfig
 from report import BatchReport, RunReport
 import selectors as ui
 
+# 结果列表排序目标（与站点下拉文案一致）
+SORT_TITLE_ASC_LABEL = "题名：升序"
+
+
+def _normalize_sort_label(s: str | None) -> str:
+    if not s:
+        return ""
+    t = s.strip().replace("：", ":")
+    return re.sub(r"\s+", "", t)
+
 
 class CscdSpider:
     def __init__(
@@ -60,8 +70,16 @@ class CscdSpider:
                 limit=effective_limit,
                 total_results_reported_by_site=total_results,
             )
-            await self._set_page_size_to_20()
+            # 先每页条数再排序（改条数会整表刷新，可能打回默认排序）
+            await self._prepare_results_view()
+            await self._verify_sort_alignment(context="prepare完成后", auto_fix=True)
+            await self._verify_page_alignment(
+                expected_page=1,
+                context="prepare完成后",
+                auto_fix=True,
+            )
             await self._goto_start_page_if_needed()
+            await self._verify_sort_alignment(context="起始页就绪后", auto_fix=True)
             await self._run_batches(report, effective_limit)
             report.complete()
             return report
@@ -126,6 +144,10 @@ class CscdSpider:
                 context=f"批次{batch_index}开始前",
                 auto_fix=True,
             )
+            await self._verify_sort_alignment(
+                context=f"批次{batch_index}开始前",
+                auto_fix=True,
+            )
             batch_records = min(remaining, self.config.max_export_per_batch)
             pages_to_select = min(
                 self.config.max_pages_per_batch,
@@ -153,11 +175,33 @@ class CscdSpider:
                 batch.selected_records = selected_records
                 batch.end_page = current_page + actual_pages - 1
 
-                downloaded_file = await self._export_selected(
-                    batch_index=batch_index,
-                    start_page=batch.start_page,
-                    end_page=batch.end_page,
-                )
+                try:
+                    downloaded_file = await self._export_selected(
+                        start_page=batch.start_page,
+                        end_page=batch.end_page,
+                    )
+                except Exception as export_err:
+                    self.logger.warning(
+                        "批次 %s 导出失败，整页恢复后从第 %s 页重勾本批: %s",
+                        batch_index,
+                        batch.start_page,
+                        export_err,
+                    )
+                    await self._hard_recover_state(batch.start_page)
+                    actual_pages = await self._select_pages_for_current_batch(
+                        pages_to_select=pages_to_select,
+                        expected_start_page=batch.start_page,
+                    )
+                    if actual_pages <= 0:
+                        raise RuntimeError("整页恢复后仍无法完成本批页勾选。") from export_err
+                    selected_records = min(batch_records, actual_pages * self.config.page_size)
+                    batch.selected_pages = actual_pages
+                    batch.selected_records = selected_records
+                    batch.end_page = batch.start_page + actual_pages - 1
+                    downloaded_file = await self._export_selected(
+                        start_page=batch.start_page,
+                        end_page=batch.end_page,
+                    )
                 batch.done(downloaded_file)
                 report.downloaded_files.append(downloaded_file)
                 report.batches.append(batch)
@@ -236,13 +280,195 @@ class CscdSpider:
             return False
         return False
 
-    async def _set_page_size_to_20(self) -> None:
+    async def _prepare_results_view(self) -> None:
+        """
+        检索有结果后的视图准备：先 20条/页，再「题名：升序」。
+        切换每页条数会整表刷新，可能把排序打回默认，故排序必须在改条数之后。
+        """
+        await self._set_page_size_to_20()
+        await self._ensure_sort_title_asc()
+
+    async def _read_current_sort_title(self) -> str | None:
+        """读取结果区当前排序展示（span.ant-select-selection-item 的 title 或文本）。"""
         assert self.page is not None
-        current = await self.page.locator("span.ant-select-selection-item").first.text_content()
-        if current and "20条/页" in current:
+        try:
+            trigger = await self._sort_trigger_locator()
+        except RuntimeError:
+            return None
+        item = trigger.locator("span.ant-select-selection-item").first
+        if await item.count() == 0:
+            return None
+        title = await item.get_attribute("title")
+        if title and title.strip():
+            return title.strip()
+        text = (await item.text_content() or "").strip()
+        return text or None
+
+    async def _sort_trigger_locator(self) -> Locator:
+        """结果列表排序用的 ant-select 触发器（排除分页区「每页条数」）。"""
+        assert self.page is not None
+        for sel in ui.SORT_TRIGGER_SELECTORS:
+            loc = self.page.locator(sel).first
+            if await loc.count() == 0:
+                continue
+            try:
+                await loc.wait_for(state="visible", timeout=4_000)
+                return loc
+            except PlaywrightTimeoutError:
+                continue
+
+        all_sel = self.page.locator("div.ant-select-selector")
+        n = await all_sel.count()
+        for i in range(n):
+            node = all_sel.nth(i)
+            try:
+                if not await node.is_visible():
+                    continue
+            except Exception:
+                continue
+            in_pag = node.locator("xpath=ancestor::*[contains(@class,'ant-pagination')][1]")
+            if await in_pag.count() > 0:
+                continue
+            item = node.locator("span.ant-select-selection-item").first
+            if await item.count() == 0:
+                continue
+            title = (await item.get_attribute("title")) or ""
+            text = (await item.text_content()) or ""
+            if "条/页" in title or "条/页" in text:
+                continue
+            return node
+        raise RuntimeError("未找到结果区排序下拉框（ant-select-selector）。")
+
+    async def _ensure_sort_title_asc(self) -> None:
+        assert self.page is not None
+        await self._wait_loading_overlay_hidden(timeout_ms=8_000)
+        cur = await self._read_current_sort_title()
+        if _normalize_sort_label(cur) == _normalize_sort_label(SORT_TITLE_ASC_LABEL):
+            self.logger.info("排序已为「%s」。", SORT_TITLE_ASC_LABEL)
             return
 
-        await self._safe_click(ui.PAGE_SIZE_TRIGGER_SELECTORS, "点击页大小下拉框")
+        await self._wait_loading_overlay_hidden(timeout_ms=8_000)
+        trigger = await self._sort_trigger_locator()
+        await trigger.click()
+        await self._wait_for_retry()
+        await self._safe_click(ui.SORT_TITLE_ASC_OPTIONS, "选择题名：升序")
+        await self._wait_loading_overlay_hidden(timeout_ms=15_000)
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=12_000)
+        except PlaywrightTimeoutError:
+            await self.page.wait_for_load_state("domcontentloaded")
+        await self.page.wait_for_timeout(self.config.search_settle_ms)
+
+    async def _verify_sort_alignment(self, *, context: str, auto_fix: bool) -> None:
+        cur = await self._read_current_sort_title()
+        ok = _normalize_sort_label(cur) == _normalize_sort_label(SORT_TITLE_ASC_LABEL)
+        if ok:
+            self.logger.info("[%s] 排序校验通过: %s", context, cur or "(空)")
+            return
+        msg = (
+            f"[{context}] 排序校验失败: 期望「{SORT_TITLE_ASC_LABEL}」，"
+            f"当前「{cur!r}」"
+        )
+        if not auto_fix:
+            raise RuntimeError(msg)
+        self.logger.warning("%s，尝试重新设为题名升序。", msg)
+        await self._ensure_sort_title_asc()
+        cur2 = await self._read_current_sort_title()
+        if _normalize_sort_label(cur2) != _normalize_sort_label(SORT_TITLE_ASC_LABEL):
+            raise RuntimeError(f"{msg}；纠偏后仍为「{cur2!r}」。")
+        self.logger.info("[%s] 排序已纠偏为「%s」", context, cur2)
+
+    async def _results_page_likely_ready(self) -> bool:
+        assert self.page is not None
+        if await self.page.locator("li.ant-pagination-simple-pager").count() > 0:
+            return True
+        body = await self.page.inner_text("body")
+        return bool(re.search(r"篇文献|检索结果", body))
+
+    async def _hard_recover_state(self, expected_page: int) -> None:
+        """
+        整页刷新后恢复：检索条件、20条/页、题名升序、跳到本批次起始页。
+        刷新会清空所有勾选，调用方需重新跑本批勾选循环。
+        """
+        assert self.page is not None
+        self.logger.warning("执行整页恢复，目标起始页=%s", expected_page)
+        await self.page.reload(wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+        await self._wait_loading_overlay_hidden(timeout_ms=15_000)
+        await self.page.wait_for_timeout(self.config.search_settle_ms)
+
+        if not await self._results_page_likely_ready():
+            await self._apply_year_filter(self.year)
+            _ = await self._read_total_results()
+
+        await self._prepare_results_view()
+        await self._verify_sort_alignment(context="整页恢复后", auto_fix=True)
+        await self._verify_page_alignment(
+            expected_page=expected_page,
+            context="整页恢复后",
+            auto_fix=True,
+        )
+
+    async def _page_size_trigger_locator(self) -> Locator:
+        """
+        每页条数下拉：优先分页区域；兜底为「展示文案/title 含 条/页」且不含排序语义的 ant-select。
+        （站点可能把 selector 放在 ant-pagination-options，或文案只在 title 上，:has-text 会失效）
+        """
+        assert self.page is not None
+        for sel in (
+            ".ant-pagination .ant-select-selector",
+            "li.ant-pagination-options .ant-select-selector",
+            ".ant-pagination-options .ant-select-selector",
+        ):
+            loc = self.page.locator(sel).first
+            if await loc.count() == 0:
+                continue
+            try:
+                await loc.wait_for(state="visible", timeout=4_000)
+                return loc
+            except PlaywrightTimeoutError:
+                continue
+
+        all_sel = self.page.locator("div.ant-select-selector")
+        n = await all_sel.count()
+        for i in range(n):
+            node = all_sel.nth(i)
+            try:
+                if not await node.is_visible():
+                    continue
+            except Exception:
+                continue
+            item = node.locator("span.ant-select-selection-item").first
+            if await item.count() == 0:
+                continue
+            title = (await item.get_attribute("title")) or ""
+            text = (await item.text_content()) or ""
+            if "条/页" not in title and "条/页" not in text:
+                continue
+            if "题名" in title or "排序" in title or "默认排序" in title:
+                continue
+            return node
+        raise RuntimeError(
+            "未找到每页条数下拉框（分页区 ant-select 或含「条/页」的 selection-item）。"
+        )
+
+    async def _set_page_size_to_20(self) -> None:
+        assert self.page is not None
+        try:
+            trigger = await self._page_size_trigger_locator()
+            item = trigger.locator("span.ant-select-selection-item").first
+            if await item.count() > 0:
+                title = (await item.get_attribute("title")) or ""
+                text = (await item.text_content()) or ""
+                blob = (title + text).replace(" ", "")
+                if "20条/页" in blob or ("20" in blob and "条" in blob and "/页" in blob):
+                    return
+        except RuntimeError:
+            pass
+
+        await self._wait_loading_overlay_hidden(timeout_ms=8_000)
+        trigger = await self._page_size_trigger_locator()
+        await trigger.click()
+        await self._wait_for_retry()
         await self._safe_click(ui.PAGE_SIZE_20_OPTIONS, "选择20条/页")
         await self.page.wait_for_timeout(1200)
 
@@ -252,6 +478,10 @@ class CscdSpider:
             expected_page = expected_start_page + i
             await self._verify_page_alignment(
                 expected_page=expected_page,
+                context=f"批次内第{i + 1}/{pages_to_select}次勾选前",
+                auto_fix=True,
+            )
+            await self._verify_sort_alignment(
                 context=f"批次内第{i + 1}/{pages_to_select}次勾选前",
                 auto_fix=True,
             )
@@ -283,11 +513,15 @@ class CscdSpider:
                     context="点击下一页后",
                     auto_fix=True,
                 )
+                await self._verify_sort_alignment(
+                    context="点击下一页后",
+                    auto_fix=True,
+                )
             return True
         except Exception:
             return False
 
-    async def _export_selected(self, batch_index: int, start_page: int, end_page: int) -> str:
+    async def _export_selected(self, start_page: int, end_page: int) -> str:
         assert self.page is not None
         await self._safe_click_export_menu()
         await self._safe_click(ui.EXPORT_DOWNLOAD_MENUITEM_SELECTORS, "选择下载导出")
@@ -298,11 +532,11 @@ class CscdSpider:
             await export_button.click()
         download = await download_info.value
 
-        suggested_name = download.suggested_filename or f"batch_{batch_index}.xlsx"
-        output_name = f"batch_{batch_index:03d}_p{start_page}-{end_page}_{suggested_name}"
+        suggested_name = download.suggested_filename or f"p{start_page}-{end_page}.xlsx"
+        output_name = f"batch_p{start_page}-{end_page}_{suggested_name}"
         output_path = self.download_dir / output_name
         await download.save_as(str(output_path))
-        self.logger.info("批次 %s 下载完成: %s", batch_index, output_path)
+        self.logger.info("下载完成: %s", output_path)
         return str(output_path)
 
     async def _read_pagination_progress(self) -> tuple[int, int] | None:
