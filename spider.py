@@ -54,6 +54,8 @@ class CscdSpider:
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
+        # 整页恢复过程中禁止「遮罩双超时→再次刷新」嵌套
+        self._inside_hard_recover: bool = False
 
     async def run(self) -> RunReport:
         await self._start_browser()
@@ -387,26 +389,37 @@ class CscdSpider:
 
     async def _hard_recover_state(self, expected_page: int) -> None:
         """
-        整页刷新后恢复：检索条件、20条/页、题名升序、跳到本批次起始页。
+        整页刷新后恢复：检索条件、20条/页、题名升序、跳到目标页并校验。
         刷新会清空所有勾选，调用方需重新跑本批勾选循环。
         """
         assert self.page is not None
-        self.logger.warning("执行整页恢复，目标起始页=%s", expected_page)
-        await self.page.reload(wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
-        await self._wait_loading_overlay_hidden(timeout_ms=15_000)
-        await self.page.wait_for_timeout(self.config.search_settle_ms)
+        self._inside_hard_recover = True
+        try:
+            self.logger.warning("执行整页恢复，目标起始页=%s", expected_page)
+            await self.page.reload(wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+            await self._wait_loading_overlay_hidden(timeout_ms=15_000)
+            await self.page.wait_for_timeout(self.config.search_settle_ms)
 
-        if not await self._results_page_likely_ready():
-            await self._apply_year_filter(self.year)
-            _ = await self._read_total_results()
+            if not await self._results_page_likely_ready():
+                await self._apply_year_filter(self.year)
+                _ = await self._read_total_results()
 
-        await self._prepare_results_view()
-        await self._verify_sort_alignment(context="整页恢复后", auto_fix=True)
-        await self._verify_page_alignment(
-            expected_page=expected_page,
-            context="整页恢复后",
-            auto_fix=True,
-        )
+            await self._prepare_results_view()
+            await self._verify_sort_alignment(context="整页恢复后", auto_fix=True)
+            await self._verify_page_alignment(
+                expected_page=expected_page,
+                context="整页恢复后",
+                auto_fix=True,
+            )
+        finally:
+            self._inside_hard_recover = False
+
+    async def _read_current_page_for_recover(self) -> int:
+        """分页器可读时返回当前页，否则 1（用于遮罩双超时后未传入期望页时的兜底）。"""
+        p = await self._read_pagination_progress()
+        if p:
+            return p[0]
+        return 1
 
     async def _page_size_trigger_locator(self) -> Locator:
         """
@@ -618,22 +631,52 @@ class CscdSpider:
         await self._click_checkbox_toggle(ui.ALL_RECORDS_CHECKBOX_SELECTORS, "所有记录取消(1/2)")
         await self._click_checkbox_toggle(ui.ALL_RECORDS_CHECKBOX_SELECTORS, "所有记录取消(2/2)")
 
-    async def _wait_loading_overlay_hidden(self, timeout_ms: int | None = None) -> None:
+    async def _wait_loading_overlay_hidden(
+        self,
+        timeout_ms: int | None = None,
+        *,
+        expected_page: int | None = None,
+    ) -> None:
         """
         等待全屏 loading 遮罩消失，避免点击被 useLoading/ant-spin 拦截。
+
+        同一轮调用中，若前两个遮罩（useLoading 全屏层、ant-spin-fullscreen）**均**等待超时，
+        则视为遮罩卡死，执行一次 `page.reload` 并走 `_hard_recover_state`（20条/页、题名升序、
+        页码与排序校验）。`expected_page` 可传入期望页码；未传则从分页器读取当前页。
+        在 `_hard_recover_state` 内部不会再次触发本逻辑（防嵌套刷新）。
         """
         assert self.page is not None
         t = timeout_ms or self.config.default_timeout_ms
-        for selector in ui.LOADING_OVERLAY_SELECTORS:
+        timeout_idx0 = False
+        timeout_idx1 = False
+        for i, selector in enumerate(ui.LOADING_OVERLAY_SELECTORS):
             loc = self.page.locator(selector)
             try:
-                # 允许不存在；存在时需 hidden
                 await loc.first.wait_for(state="hidden", timeout=t)
             except PlaywrightTimeoutError:
-                # 某些站点 spin 闪烁，继续由后续重试兜底
                 self.logger.warning("等待遮罩消失超时: %s", selector)
+                if i == 0:
+                    timeout_idx0 = True
+                if i == 1:
+                    timeout_idx1 = True
             except Exception:
                 continue
+
+        if (
+            timeout_idx0
+            and timeout_idx1
+            and not self._inside_hard_recover
+        ):
+            ep = expected_page if expected_page is not None else await self._read_current_page_for_recover()
+            self.logger.warning(
+                "同一轮内前两处全屏遮罩均等待超时，执行整页刷新并恢复状态（目标页=%s）。",
+                ep,
+            )
+            await self._hard_recover_state(ep)
+            self.logger.warning(
+                "整页恢复后勾选已全部清空；若正处于多页批次中途，此前已勾页可能丢失，"
+                "本批导出条数可能不足。导出失败时会自动从批次首页整批重勾。"
+            )
 
     async def _safe_click_export_menu(self) -> None:
         """
