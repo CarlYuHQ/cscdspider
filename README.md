@@ -91,6 +91,26 @@ python parse_cscd_txts_to_csv.py --base "D:\路径\cscdspider" --out "D:\路径\
 
 解析规则：以行首「文献收藏号：」切分篇目；每行「字段名：值」采用全角冒号；常见列为 文献收藏号、题名、作者、机构、实验室（可无）、关键词、来源、基金、文摘、被引频次，并附加 `source_file` 便于溯源。
 
+## 按中英文拆分年度 CSV
+
+可将年度总表（如 `2019.csv`、`2020.csv`）按语言拆分为 `YYYY-zh.csv` 与 `YYYY-en.csv`：
+
+```bash
+cd cscdspider
+python split_cscd_csv_by_lang.py --inputs 2019.csv 2020.csv
+# 或指定输入与输出目录
+python split_cscd_csv_by_lang.py --inputs "D:\路径\2019.csv" --out "D:\路径\输出"
+```
+
+拆分规则：
+
+- 仅根据 `题名` 字段判定
+- `题名` 含中文字符 -> 写入 `*-zh.csv`
+- `题名` 不含中文字符 -> 写入 `*-en.csv`
+- `题名` 为空时默认写入 `*-zh.csv`
+
+脚本会对每个输入文件打印 `total / zh / en`，并校验 `zh + en == total`；若不相等则报错退出。
+
 ## 说明
 
 - 运行入口固定使用 `python run.py ...`，不需要 `python -m`。
