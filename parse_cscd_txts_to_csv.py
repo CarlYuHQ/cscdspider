@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-将 CSCD 导出的 .txt 批量解析为 2019.csv / 2020.csv。
+将 CSCD 导出的 .txt 批量解析为各年份 CSV（可通过 --years 指定）。
 
 文本规则（基于样例）：
 - 每篇以「文献收藏号：」起头，篇与篇之间可有空行，分割不明显，故以该标记切分记录。
@@ -119,13 +119,13 @@ def _discover_and_parse(txt_paths: list[Path]) -> tuple[list[dict[str, str]], li
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="将 2019、2020 目录下 batch_*.txt 解析合并为 2019.csv、2020.csv"
+        description="将指定年份目录下 batch_*.txt 解析合并为对应年份 CSV"
     )
     ap.add_argument(
         "--base",
         type=Path,
         default=None,
-        help="含 2019/与 2020/ 子目录的路径（默认：脚本所在 cscdspider 目录）",
+        help="含各年份子目录的路径（默认：脚本所在 cscdspider 目录）",
     )
     ap.add_argument(
         "--out",
@@ -133,12 +133,18 @@ def main() -> int:
         default=None,
         help="输出目录（默认同 --base）",
     )
+    ap.add_argument(
+        "--years",
+        nargs="+",
+        default=["2019", "2020"],
+        help="要解析的年份列表（默认：2019 2020），例如：--years 2019 2020 2021",
+    )
     args = ap.parse_args()
     base = args.base or Path(__file__).resolve().parent
     out_dir = args.out or base
 
-    for year, sub in (("2019", "2019"), ("2020", "2020")):
-        folder = base / sub
+    for year in args.years:
+        folder = base / year
         if not folder.is_dir():
             print(f"跳过：目录不存在 {folder}", file=sys.stderr)
             continue

@@ -80,16 +80,22 @@ python run.py --year 2019 --limit 1000 --download-dir "D:\\data\\cscd"
 
 ## 将下载的 txt 合并为年度 CSV
 
-各年目录（如 `2019/`、`2020/`）下所有 `batch_*.txt` 可合并为 `2019.csv`、`2020.csv`（UTF-8 BOM，便于 Excel 打开）：
+各年目录（如 `2019/`、`2020/`）下所有 `batch_*.txt` 可合并为对应年份 CSV（UTF-8 BOM，便于 Excel 打开）：
 
 ```bash
 cd cscdspider
 python parse_cscd_txts_to_csv.py
+# 指定年份（新增）
+python parse_cscd_txts_to_csv.py --years 2019 2020 2021
 # 或指定根目录与输出目录
-python parse_cscd_txts_to_csv.py --base "D:\路径\cscdspider" --out "D:\路径\cscdspider"
+python parse_cscd_txts_to_csv.py --base "D:\路径\cscdspider" --out "D:\路径\cscdspider" --years 2019 2020 2021
 ```
 
 解析规则：以行首「文献收藏号：」切分篇目；每行「字段名：值」采用全角冒号；常见列为 文献收藏号、题名、作者、机构、实验室（可无）、关键词、来源、基金、文摘、被引频次，并附加 `source_file` 便于溯源。
+
+参数说明补充：
+
+- `--years`：要解析的年份列表（默认 `2019 2020`）
 
 ## 按中英文拆分年度 CSV
 
